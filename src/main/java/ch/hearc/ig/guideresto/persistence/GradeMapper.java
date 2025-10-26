@@ -8,18 +8,17 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Types;
-import java.util.HashMap;
 import java.util.LinkedHashSet;
-import java.util.Map;
 import java.util.Set;
 
+/**
+ * Data Mapper pour Grade ↔ table NOTES.
+ * - ⚠️ Aucune gestion de transaction ici (commit/rollback) : laissé à la couche service.
+ * - Cache : utilise l’Identity Map générique d’AbstractMapper.
+ */
 public class GradeMapper extends AbstractMapper<Grade> {
 
-    // Identity Map
-    private final Map<Integer, Grade> cache = new HashMap<>();
-
-    // ❗ IMPORTANT : pas de CompleteEvaluationMapper ici (pour éviter le cycle)
+    // Dépendance (FK)
     private final EvaluationCriteriaMapper criteriaMapper = new EvaluationCriteriaMapper();
 
     @Override
@@ -34,7 +33,9 @@ public class GradeMapper extends AbstractMapper<Grade> {
     // -------------------- Finders --------------------
     @Override
     public Grade findById(int id) {
-        if (cache.containsKey(id)) return cache.get(id);
+        Grade cached = getFromCache(id);
+        if (cached != null) return cached;
+
         String sql = "SELECT NUMERO, NOTE, FK_COMM, FK_CRIT FROM NOTES WHERE NUMERO = ?";
         Connection cn = ConnectionUtils.getConnection();
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
@@ -79,7 +80,7 @@ public class GradeMapper extends AbstractMapper<Grade> {
             ps.setInt(1, evaluationId);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    Grade g = mapRow(rs, null); // on ne pose pas l'évaluation ici
+                    Grade g = mapRow(rs, null); // ne pose pas l'évaluation ici (évite le cycle)
                     addToCache(g);
                     out.add(g);
                 }
@@ -110,16 +111,16 @@ public class GradeMapper extends AbstractMapper<Grade> {
             ps.setInt(3, object.getCriteria().getId());
             ps.executeUpdate();
 
+            // Récupération de la PK (séquence/trigger)
             try (PreparedStatement psSeq = cn.prepareStatement(getSequenceQuery());
                  ResultSet rs = psSeq.executeQuery()) {
                 if (rs.next()) object.setId(rs.getInt(1));
             }
-            cn.commit();
+
             addToCache(object);
             return object;
         } catch (SQLException ex) {
             logger.error("create(Grade) - {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException e) { logger.error("rollback - {}", e.getMessage(), e); }
         }
         return null;
     }
@@ -127,6 +128,9 @@ public class GradeMapper extends AbstractMapper<Grade> {
     @Override
     public boolean update(Grade object) {
         if (object.getId() == null) return false;
+        if (object.getEvaluation() == null || object.getEvaluation().getId() == null) return false;
+        if (object.getCriteria() == null || object.getCriteria().getId() == null) return false;
+
         String sql = "UPDATE NOTES SET NOTE = ?, FK_COMM = ?, FK_CRIT = ? WHERE NUMERO = ?";
         Connection cn = ConnectionUtils.getConnection();
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
@@ -135,15 +139,12 @@ public class GradeMapper extends AbstractMapper<Grade> {
             ps.setInt(3, object.getCriteria().getId());
             ps.setInt(4, object.getId());
             int upd = ps.executeUpdate();
-            cn.commit();
             if (upd > 0) {
-                removeFromCache(object.getId());
-                addToCache(object);
+                addToCache(object); // remplace/rafraîchit dans l’Identity Map
                 return true;
             }
         } catch (SQLException ex) {
             logger.error("update(Grade) - {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException e) { logger.error("rollback - {}", e.getMessage(), e); }
         }
         return false;
     }
@@ -160,14 +161,12 @@ public class GradeMapper extends AbstractMapper<Grade> {
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
             ps.setInt(1, id);
             int del = ps.executeUpdate();
-            cn.commit();
             if (del > 0) {
                 removeFromCache(id);
                 return true;
             }
         } catch (SQLException ex) {
             logger.error("deleteById({}) - {}", id, ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException e) { logger.error("rollback - {}", e.getMessage(), e); }
         }
         return false;
     }
@@ -185,14 +184,4 @@ public class GradeMapper extends AbstractMapper<Grade> {
         if (parent != null) g.setEvaluation(parent);
         return g;
     }
-
-    // -------------------- Cache --------------------
-    @Override protected boolean isCacheEmpty() { return cache.isEmpty(); }
-    @Override protected void resetCache() { cache.clear(); }
-    @Override protected void addToCache(Grade objet) {
-        if (objet != null && objet.getId() != null && !cache.containsKey(objet.getId())) {
-            cache.put(objet.getId(), objet);
-        }
-    }
-    @Override protected void removeFromCache(Integer id) { if (id != null) cache.remove(id); }
 }

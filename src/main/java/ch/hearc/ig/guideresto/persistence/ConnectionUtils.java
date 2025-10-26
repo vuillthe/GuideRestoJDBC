@@ -30,7 +30,7 @@ public class ConnectionUtils {
             String username = dbProps.getString("database.username");
             String password = dbProps.getString("database.password");
 
-            logger.info("Trying to connect to user schema '{}' with JDBC string '{}'", username, url);
+            //logger.info("Trying to connect to user schema '{}' with JDBC string '{}'", username, url);
 
             // Initialize a connection if required
             if (ConnectionUtils.connection == null || ConnectionUtils.connection.isClosed()) {

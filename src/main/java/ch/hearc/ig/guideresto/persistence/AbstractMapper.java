@@ -16,6 +16,44 @@ public abstract class AbstractMapper<T extends IBusinessObject> {
 
     protected static final Logger logger = LogManager.getLogger();
 
+    // ================= Identity Map générique =================
+    private final Map<Integer, T> identityMap = new HashMap<>();
+
+    /** Récupère un objet du cache par son id (ou null s’il n’y est pas). */
+    protected T getFromCache(Integer id) {
+        return (id == null) ? null : identityMap.get(id);
+    }
+
+    /** L’objet avec cet id est-il déjà dans le cache ? */
+    protected boolean isInCache(Integer id) {
+        return id != null && identityMap.containsKey(id);
+    }
+
+    /** Le cache contient-il des éléments ? */
+    protected boolean isCacheEmpty() {
+        return identityMap.isEmpty();
+    }
+
+    /** Vide complètement le cache. */
+    protected void resetCache() {
+        identityMap.clear();
+    }
+
+    /** Ajoute/replace l’objet dans l’Identity Map (clé = getId()). */
+    protected void addToCache(T objet) {
+        if (objet != null && objet.getId() != null) {
+            identityMap.put(objet.getId(), objet);
+        }
+    }
+
+    /** Retire l’objet du cache par id. */
+    protected void removeFromCache(Integer id) {
+        if (id != null) {
+            identityMap.remove(id);
+        }
+    }
+    // ==========================================================
+
     public abstract T findById(int id);
     public abstract Set<T> findAll();
     public abstract T create(T object);
@@ -42,14 +80,13 @@ public abstract class AbstractMapper<T extends IBusinessObject> {
                 return rs.next();
             }
         } catch (SQLException ex) {
-            logger.error("SQLException: {}", ex.getMessage());
+            logger.error("SQLException: {}", ex.getMessage(), ex);
         }
         return false;
     }
 
     /**
      * Compte le nombre d'objets en base de données.
-     * @return
      */
     public int count() {
         Connection connection = ConnectionUtils.getConnection();
@@ -62,15 +99,13 @@ public abstract class AbstractMapper<T extends IBusinessObject> {
             }
             return 0;
         } catch (SQLException ex) {
-            logger.error("SQLException: {}", ex.getMessage());
+            logger.error("SQLException: {}", ex.getMessage(), ex);
             return 0;
         }
     }
 
     /**
-     * Obtient la valeur de la séquence actuelle en base de données
-     * @return Le nombre de villes
-     * @En cas d'erreur SQL
+     * Obtient la valeur courante de la séquence (CURRVAL) après un INSERT.
      */
     protected Integer getSequenceValue() {
         Connection connection = ConnectionUtils.getConnection();
@@ -83,43 +118,8 @@ public abstract class AbstractMapper<T extends IBusinessObject> {
             }
             return 0;
         } catch (SQLException ex) {
-            logger.error("SQLException: {}", ex.getMessage());
+            logger.error("SQLException: {}", ex.getMessage(), ex);
             return 0;
         }
-    }
-
-    /**
-     * Vérifie si le cache est actuellement vide
-     * @return true si le cache ne contient aucun objet, false sinon
-     */
-    protected boolean isCacheEmpty() {
-        // TODO à implémenter par vos soins
-        throw new UnsupportedOperationException("Vous devez implémenter votre cache vous-même !");
-    }
-
-    /**
-     * Vide le cache
-     */
-    protected void resetCache() {
-        // TODO à implémenter par vos soins
-        throw new UnsupportedOperationException("Vous devez implémenter votre cache vous-même !");
-    }
-
-    /**
-     * Ajoute un objet au cache
-     * @param objet l'objet à ajouter
-     */
-    protected void addToCache(T objet) {
-        // TODO à implémenter par vos soins
-        throw new UnsupportedOperationException("Vous devez implémenter votre cache vous-même !");
-    }
-
-    /**
-     * Retire un objet du cache
-     * @param id l'ID de l'objet à retirer du cache
-     */
-    protected void removeFromCache(Integer id) {
-        // TODO à implémenter par vos soins
-        throw new UnsupportedOperationException("Vous devez implémenter votre cache vous-même !");
     }
 }

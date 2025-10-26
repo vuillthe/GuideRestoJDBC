@@ -3,30 +3,16 @@ package ch.hearc.ig.guideresto.persistence;
 import ch.hearc.ig.guideresto.business.RestaurantType;
 
 import java.sql.*;
-import java.util.*;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 /**
  * Data Mapper pour RestaurantType ↔ table TYPES_GASTRONOMIQUES.
- * - PK : NUMERO (NUMBER)
- * - Colonnes : LIBELLE (UNIQUE), DESCRIPTION (CLOB)
- * - Séquence/trigger : SEQ_TYPES_GASTRONOMIQUES + TR_BIF_TYPES_GASTRONOMIQUES
- *
- * Transactions :
- * - create/update/delete -> commit() si OK, rollback() en cas d'erreur.
- *
- * Cache (Identity Map) :
- * - Map<Integer, RestaurantType> cache : évite les doublons mémoire.
+ * - Transactions : AUCUN commit/rollback ici → gérés par la couche service.
+ * - Cache : Identity Map générique (AbstractMapper).
  */
 public class RestaurantTypeMapper extends AbstractMapper<RestaurantType> {
 
-    // -------------------------------
-    // Identity Map
-    // -------------------------------
-    private final Map<Integer, RestaurantType> cache = new HashMap<>();
-
-    // -------------------------------
-    // Requêtes "génériques" (Abstract)
-    // -------------------------------
     @Override
     protected String getSequenceQuery() {
         return "SELECT SEQ_TYPES_GASTRONOMIQUES.CURRVAL FROM dual";
@@ -42,14 +28,12 @@ public class RestaurantTypeMapper extends AbstractMapper<RestaurantType> {
         return "SELECT COUNT(*) FROM TYPES_GASTRONOMIQUES";
     }
 
-    // -------------------------------
-    // CRUD & finders
-    // -------------------------------
+    // -------------------- Finders --------------------
     @Override
     public RestaurantType findById(int id) {
-        if (cache.containsKey(id)) {
-            return cache.get(id);
-        }
+        RestaurantType cached = getFromCache(id);
+        if (cached != null) return cached;
+
         String sql = "SELECT NUMERO, LIBELLE, DESCRIPTION FROM TYPES_GASTRONOMIQUES WHERE NUMERO = ?";
         Connection cn = ConnectionUtils.getConnection();
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
@@ -85,7 +69,7 @@ public class RestaurantTypeMapper extends AbstractMapper<RestaurantType> {
         return out;
     }
 
-    /** Finder utile vu la contrainte d'unicité sur LIBELLE. */
+    /** Finder par libellé (unique). */
     public RestaurantType findByLabel(String label) {
         String sql = "SELECT NUMERO, LIBELLE, DESCRIPTION FROM TYPES_GASTRONOMIQUES WHERE LIBELLE = ?";
         Connection cn = ConnectionUtils.getConnection();
@@ -104,6 +88,7 @@ public class RestaurantTypeMapper extends AbstractMapper<RestaurantType> {
         return null;
     }
 
+    // -------------------- CRUD (sans commit/rollback) --------------------
     @Override
     public RestaurantType create(RestaurantType object) {
         String sql = "INSERT INTO TYPES_GASTRONOMIQUES (LIBELLE, DESCRIPTION) VALUES (?, ?)";
@@ -113,22 +98,16 @@ public class RestaurantTypeMapper extends AbstractMapper<RestaurantType> {
             ps.setString(2, object.getDescription());
             ps.executeUpdate();
 
-            // Récupération de l'ID généré par le trigger/séquence
+            // Récupération de l'ID (trigger/séquence)
             try (PreparedStatement psSeq = cn.prepareStatement(getSequenceQuery());
                  ResultSet rs = psSeq.executeQuery()) {
-                if (rs.next()) {
-                    object.setId(rs.getInt(1));
-                }
+                if (rs.next()) object.setId(rs.getInt(1));
             }
 
-            cn.commit();
             addToCache(object);
             return object;
         } catch (SQLException ex) {
             logger.error("create(RestaurantType) - SQLException: {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("create(RestaurantType) - rollback error: {}", rollEx.getMessage(), rollEx);
-            }
         }
         return null;
     }
@@ -146,18 +125,13 @@ public class RestaurantTypeMapper extends AbstractMapper<RestaurantType> {
             ps.setString(2, object.getDescription());
             ps.setInt(3, object.getId());
             int updated = ps.executeUpdate();
-            cn.commit();
 
             if (updated > 0) {
-                removeFromCache(object.getId());
-                addToCache(object);
+                addToCache(object); // refresh Identity Map
                 return true;
             }
         } catch (SQLException ex) {
             logger.error("update(RestaurantType) - SQLException: {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("update(RestaurantType) - rollback error: {}", rollEx.getMessage(), rollEx);
-            }
         }
         return false;
     }
@@ -178,7 +152,6 @@ public class RestaurantTypeMapper extends AbstractMapper<RestaurantType> {
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
             ps.setInt(1, id);
             int deleted = ps.executeUpdate();
-            cn.commit();
 
             if (deleted > 0) {
                 removeFromCache(id);
@@ -186,48 +159,16 @@ public class RestaurantTypeMapper extends AbstractMapper<RestaurantType> {
             }
         } catch (SQLException ex) {
             logger.error("deleteById({}) - SQLException: {}", id, ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("deleteById({}) - rollback error: {}", id, rollEx.getMessage(), rollEx);
-            }
         }
         return false;
     }
 
-    // -------------------------------
-    // Helpers
-    // -------------------------------
+    // -------------------- Helper --------------------
     private RestaurantType mapRow(ResultSet rs) throws SQLException {
         return new RestaurantType(
                 rs.getInt("NUMERO"),
                 rs.getString("LIBELLE"),
                 rs.getString("DESCRIPTION")
         );
-    }
-
-    // -------------------------------
-    // Implémentation du cache
-    // -------------------------------
-    @Override
-    protected boolean isCacheEmpty() {
-        return cache.isEmpty();
-    }
-
-    @Override
-    protected void resetCache() {
-        cache.clear();
-    }
-
-    @Override
-    protected void addToCache(RestaurantType objet) {
-        if (objet != null && objet.getId() != null && !cache.containsKey(objet.getId())) {
-            cache.put(objet.getId(), objet);
-        }
-    }
-
-    @Override
-    protected void removeFromCache(Integer id) {
-        if (id != null) {
-            cache.remove(id);
-        }
     }
 }

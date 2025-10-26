@@ -3,7 +3,8 @@ package ch.hearc.ig.guideresto.persistence;
 import ch.hearc.ig.guideresto.business.City;
 
 import java.sql.*;
-import java.util.*;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 /**
  * Data Mapper pour la classe métier City ↔ table VILLES.
@@ -12,17 +13,12 @@ import java.util.*;
  * - Séquence/trigger : SEQ_VILLES + TR_BIF_VILLES (génère l'ID à l'INSERT)
  *
  * Transactions :
- * - create/update/delete -> commit() si OK, rollback() en cas d'erreur.
+ * - AUCUN commit/rollback ici (gérés par la couche service).
  *
  * Cache (Identity Map) :
- * - Map<Integer, City> cache : évite les doublons en mémoire et limite les allers/retours DB.
+ * - Utilise l’Identity Map générique d’AbstractMapper (getFromCache/addToCache/removeFromCache).
  */
 public class CityMapper extends AbstractMapper<City> {
-
-    // -------------------------------
-    // Identity Map (cache par mapper)
-    // -------------------------------
-    private final Map<Integer, City> cache = new HashMap<>();
 
     // -------------------------------
     // Requêtes "génériques" (Abstract)
@@ -48,10 +44,9 @@ public class CityMapper extends AbstractMapper<City> {
     // -------------------------------
     @Override
     public City findById(int id) {
-        // 1) cache d'abord
-        if (cache.containsKey(id)) {
-            return cache.get(id);
-        }
+        // 1) cache d'abord (Identity Map générique)
+        City cached = getFromCache(id);
+        if (cached != null) return cached;
 
         String sql = "SELECT NUMERO, CODE_POSTAL, NOM_VILLE FROM VILLES WHERE NUMERO = ?";
         Connection cn = ConnectionUtils.getConnection();
@@ -79,7 +74,7 @@ public class CityMapper extends AbstractMapper<City> {
              ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
                 City c = mapRow(rs);
-                addToCache(c);
+                addToCache(c);    // alimente l’Identity Map
                 results.add(c);
             }
         } catch (SQLException ex) {
@@ -108,14 +103,12 @@ public class CityMapper extends AbstractMapper<City> {
                 }
             }
 
-            cn.commit();
+            // PAS de commit ici : la couche service s'en charge
             addToCache(object); // tient le cache à jour
             return object;
         } catch (SQLException ex) {
+            // PAS de rollback ici : la couche service s'en charge
             logger.error("create(City) - SQLException: {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("create(City) - rollback error: {}", rollEx.getMessage(), rollEx);
-            }
         }
         return null;
     }
@@ -134,19 +127,15 @@ public class CityMapper extends AbstractMapper<City> {
             ps.setString(2, object.getCityName());
             ps.setInt(3, object.getId());
             int updated = ps.executeUpdate();
-            cn.commit();
 
+            // PAS de commit ici
             if (updated > 0) {
-                // rafraîchir le cache
-                removeFromCache(object.getId());
-                addToCache(object);
+                addToCache(object); // refresh l’instance dans l’Identity Map
                 return true;
             }
         } catch (SQLException ex) {
+            // PAS de rollback ici
             logger.error("update(City) - SQLException: {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("update(City) - rollback error: {}", rollEx.getMessage(), rollEx);
-            }
         }
         return false;
     }
@@ -167,17 +156,15 @@ public class CityMapper extends AbstractMapper<City> {
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
             ps.setInt(1, id);
             int deleted = ps.executeUpdate();
-            cn.commit();
 
+            // PAS de commit ici
             if (deleted > 0) {
-                removeFromCache(id);
+                removeFromCache(id); // purge l’Identity Map
                 return true;
             }
         } catch (SQLException ex) {
+            // PAS de rollback ici
             logger.error("deleteById({}) - SQLException: {}", id, ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("deleteById({}) - rollback error: {}", id, rollEx.getMessage(), rollEx);
-            }
         }
         return false;
     }
@@ -191,34 +178,7 @@ public class CityMapper extends AbstractMapper<City> {
                 rs.getString("CODE_POSTAL"),
                 rs.getString("NOM_VILLE")
         );
-        // c.setRestaurants(...) -> lazy: on ne charge pas ici
+        // c.setRestaurants(...) -> lazy
         return c;
-    }
-
-    // -------------------------------
-    // Implémentation du cache (AbstractMapper)
-    // -------------------------------
-    @Override
-    protected boolean isCacheEmpty() {
-        return cache.isEmpty();
-    }
-
-    @Override
-    protected void resetCache() {
-        cache.clear();
-    }
-
-    @Override
-    protected void addToCache(City objet) {
-        if (objet != null && objet.getId() != null && !cache.containsKey(objet.getId())) {
-            cache.put(objet.getId(), objet);
-        }
-    }
-
-    @Override
-    protected void removeFromCache(Integer id) {
-        if (id != null) {
-            cache.remove(id);
-        }
     }
 }

@@ -3,53 +3,34 @@ package ch.hearc.ig.guideresto.persistence;
 import ch.hearc.ig.guideresto.business.CompleteEvaluation;
 import ch.hearc.ig.guideresto.business.Grade;
 import ch.hearc.ig.guideresto.business.Restaurant;
+import ch.hearc.ig.guideresto.business.EvaluationCriteria;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
-import java.sql.Types;
 import java.sql.SQLException;
 import java.util.Date;
 import java.util.LinkedHashSet;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Set;
 
 /**
  * Data Mapper pour CompleteEvaluation ↔ table COMMENTAIRES.
- * - PK : NUMERO
- * - Colonnes : DATE_EVAL (DATE), COMMENTAIRE (CLOB), NOM_UTILISATEUR, FK_REST
- * - FK : FK_REST → RESTAURANTS.NUMERO
- * - Séquence/trigger : SEQ_EVAL + TR_BIF_COMMENTAIRES
- *
- * Chargement :
- * - Restaurant (FK_REST) en EAGER.
- * - grades (1-*) en LAZY par défaut (méthode utilitaire loadGrades).
- *
- * Transactions : create/update/delete -> commit() si OK, rollback() en cas d'erreur.
- *
- * Cache : Identity Map (Map<Integer, CompleteEvaluation>)
+ * - Transactions : AUCUN commit/rollback ici → gérés par la couche service.
+ * - Cache : Identity Map générique (AbstractMapper).
+ * - Chargement : Restaurant (FK_REST) en eager ; grades en lazy via loadGrades(...).
  */
 public class CompleteEvaluationMapper extends AbstractMapper<CompleteEvaluation> {
 
-    // -------------------------------
-    // Identity Map
-    // -------------------------------
-    private final Map<Integer, CompleteEvaluation> cache = new HashMap<>();
-
-    // -------------------------------
     // Dépendances (FK)
-    // -------------------------------
     private final RestaurantMapper restaurantMapper = new RestaurantMapper();
-    private final GradeMapper gradeMapper = new GradeMapper();
+    private final EvaluationCriteriaMapper criteriaMapper = new EvaluationCriteriaMapper();
 
     // -------------------------------
     // Requêtes "génériques" (Abstract)
     // -------------------------------
     @Override
     protected String getSequenceQuery() {
-        // Même séquence que LIKES selon le schéma
         return "SELECT SEQ_EVAL.CURRVAL FROM dual";
     }
 
@@ -68,7 +49,8 @@ public class CompleteEvaluationMapper extends AbstractMapper<CompleteEvaluation>
     // -------------------------------
     @Override
     public CompleteEvaluation findById(int id) {
-        if (cache.containsKey(id)) return cache.get(id);
+        CompleteEvaluation cached = getFromCache(id);
+        if (cached != null) return cached;
 
         String sql = "SELECT NUMERO, DATE_EVAL, COMMENTAIRE, NOM_UTILISATEUR, FK_REST FROM COMMENTAIRES WHERE NUMERO = ?";
         Connection cn = ConnectionUtils.getConnection();
@@ -89,7 +71,8 @@ public class CompleteEvaluationMapper extends AbstractMapper<CompleteEvaluation>
 
     @Override
     public Set<CompleteEvaluation> findAll() {
-        String sql = "SELECT NUMERO, DATE_EVAL, COMMENTAIRE, NOM_UTILISATEUR, FK_REST FROM COMMENTAIRES ORDER BY DATE_EVAL DESC, NUMERO DESC";
+        String sql = "SELECT NUMERO, DATE_EVAL, COMMENTAIRE, NOM_UTILISATEUR, FK_REST " +
+                "FROM COMMENTAIRES ORDER BY DATE_EVAL DESC, NUMERO DESC";
         Set<CompleteEvaluation> out = new LinkedHashSet<>();
         Connection cn = ConnectionUtils.getConnection();
         try (PreparedStatement ps = cn.prepareStatement(sql);
@@ -107,7 +90,8 @@ public class CompleteEvaluationMapper extends AbstractMapper<CompleteEvaluation>
 
     /** Toutes les évaluations complètes d’un restaurant. */
     public Set<CompleteEvaluation> findByRestaurantId(int restaurantId) {
-        String sql = "SELECT NUMERO, DATE_EVAL, COMMENTAIRE, NOM_UTILISATEUR, FK_REST FROM COMMENTAIRES WHERE FK_REST = ? ORDER BY DATE_EVAL DESC, NUMERO DESC";
+        String sql = "SELECT NUMERO, DATE_EVAL, COMMENTAIRE, NOM_UTILISATEUR, FK_REST " +
+                "FROM COMMENTAIRES WHERE FK_REST = ? ORDER BY DATE_EVAL DESC, NUMERO DESC";
         Set<CompleteEvaluation> out = new LinkedHashSet<>();
         Connection cn = ConnectionUtils.getConnection();
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
@@ -127,7 +111,8 @@ public class CompleteEvaluationMapper extends AbstractMapper<CompleteEvaluation>
 
     /** Recherche par nom d'utilisateur exact. */
     public Set<CompleteEvaluation> findByUsername(String username) {
-        String sql = "SELECT NUMERO, DATE_EVAL, COMMENTAIRE, NOM_UTILISATEUR, FK_REST FROM COMMENTAIRES WHERE NOM_UTILISATEUR = ? ORDER BY DATE_EVAL DESC, NUMERO DESC";
+        String sql = "SELECT NUMERO, DATE_EVAL, COMMENTAIRE, NOM_UTILISATEUR, FK_REST " +
+                "FROM COMMENTAIRES WHERE NOM_UTILISATEUR = ? ORDER BY DATE_EVAL DESC, NUMERO DESC";
         Set<CompleteEvaluation> out = new LinkedHashSet<>();
         Connection cn = ConnectionUtils.getConnection();
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
@@ -152,22 +137,39 @@ public class CompleteEvaluationMapper extends AbstractMapper<CompleteEvaluation>
         return ce;
     }
 
-    /** Charge les notes (grades) LAZY pour une évaluation donnée, et rattache le parent. */
+    /**
+     * Charge les notes (grades) LAZY pour une évaluation donnée, et rattache le parent.
+     * Implémentation SQL directe pour éviter une dépendance cyclique avec GradeMapper.
+     */
     public void loadGrades(CompleteEvaluation evaluation) {
         if (evaluation == null || evaluation.getId() == null) return;
-        Set<Grade> grades = gradeMapper.findByEvaluationId(evaluation.getId());
-        // rattacher le parent à chaque grade (évite les références nulles)
-        for (Grade g : grades) {
-            g.setEvaluation(evaluation);
-        }
-        evaluation.getGrades().clear();
-        evaluation.getGrades().addAll(grades);
-    }
 
+        String sql = "SELECT NUMERO, NOTE, FK_COMM, FK_CRIT FROM NOTES WHERE FK_COMM = ? ORDER BY NUMERO";
+        Set<Grade> loaded = new LinkedHashSet<>();
+        Connection cn = ConnectionUtils.getConnection();
+        try (PreparedStatement ps = cn.prepareStatement(sql)) {
+            ps.setInt(1, evaluation.getId());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int gradeId = rs.getInt("NUMERO");
+                    int note = rs.getInt("NOTE");
+                    int fkCrit = rs.getInt("FK_CRIT");
+
+                    EvaluationCriteria crit = criteriaMapper.findById(fkCrit);
+                    Grade g = new Grade(gradeId, note, evaluation, crit);
+                    loaded.add(g);
+                }
+            }
+        } catch (SQLException ex) {
+            logger.error("loadGrades(evalId={}) - SQLException: {}", evaluation.getId(), ex.getMessage(), ex);
+        }
+
+        evaluation.getGrades().clear();
+        evaluation.getGrades().addAll(loaded);
+    }
 
     @Override
     public CompleteEvaluation create(CompleteEvaluation object) {
-        // FK_REST requis
         if (object.getRestaurant() == null || object.getRestaurant().getId() == null) {
             logger.warn("create(CompleteEvaluation) : restaurant (FK_REST) manquant.");
             return null;
@@ -193,14 +195,10 @@ public class CompleteEvaluationMapper extends AbstractMapper<CompleteEvaluation>
                 if (rs.next()) object.setId(rs.getInt(1));
             }
 
-            cn.commit();
             addToCache(object);
             return object;
         } catch (SQLException ex) {
             logger.error("create(CompleteEvaluation) - SQLException: {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("create(CompleteEvaluation) - rollback error: {}", rollEx.getMessage(), rollEx);
-            }
         }
         return null;
     }
@@ -219,7 +217,6 @@ public class CompleteEvaluationMapper extends AbstractMapper<CompleteEvaluation>
         String sql = "UPDATE COMMENTAIRES SET DATE_EVAL = ?, COMMENTAIRE = ?, NOM_UTILISATEUR = ?, FK_REST = ? WHERE NUMERO = ?";
         Connection cn = ConnectionUtils.getConnection();
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
-
             Timestamp ts = new Timestamp(
                     (object.getVisitDate() != null ? object.getVisitDate().getTime() : System.currentTimeMillis())
             );
@@ -230,18 +227,12 @@ public class CompleteEvaluationMapper extends AbstractMapper<CompleteEvaluation>
             ps.setInt(5, object.getId());
 
             int updated = ps.executeUpdate();
-            cn.commit();
-
             if (updated > 0) {
-                removeFromCache(object.getId());
-                addToCache(object);
+                addToCache(object); // refresh Identity Map
                 return true;
             }
         } catch (SQLException ex) {
             logger.error("update(CompleteEvaluation) - SQLException: {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("update(CompleteEvaluation) - rollback error: {}", rollEx.getMessage(), rollEx);
-            }
         }
         return false;
     }
@@ -262,17 +253,12 @@ public class CompleteEvaluationMapper extends AbstractMapper<CompleteEvaluation>
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
             ps.setInt(1, id);
             int deleted = ps.executeUpdate();
-            cn.commit();
-
             if (deleted > 0) {
                 removeFromCache(id);
                 return true;
             }
         } catch (SQLException ex) {
             logger.error("deleteById({}) - SQLException: {}", id, ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("deleteById({}) - rollback error: {}", id, rollEx.getMessage(), rollEx);
-            }
         }
         return false;
     }
@@ -292,36 +278,8 @@ public class CompleteEvaluationMapper extends AbstractMapper<CompleteEvaluation>
         Restaurant rest = null;
         if (eagerFK && fkRest > 0) {
             rest = restaurantMapper.findById(fkRest);
-        } else if (fkRest > 0) {
-            // Variante light si besoin :
-            // rest = new Restaurant(fkRest, null, null, null, (Localisation) null, (RestaurantType) null);
         }
 
         return new CompleteEvaluation(id, visitDate, rest, comment, username);
-    }
-
-    // -------------------------------
-    // Implémentation du cache
-    // -------------------------------
-    @Override
-    protected boolean isCacheEmpty() {
-        return cache.isEmpty();
-    }
-
-    @Override
-    protected void resetCache() {
-        cache.clear();
-    }
-
-    @Override
-    protected void addToCache(CompleteEvaluation objet) {
-        if (objet != null && objet.getId() != null && !cache.containsKey(objet.getId())) {
-            cache.put(objet.getId(), objet);
-        }
-    }
-
-    @Override
-    protected void removeFromCache(Integer id) {
-        if (id != null) cache.remove(id);
     }
 }

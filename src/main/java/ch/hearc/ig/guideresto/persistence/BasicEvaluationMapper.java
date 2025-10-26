@@ -7,38 +7,18 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
-import java.sql.Types;
 import java.sql.SQLException;
 import java.util.LinkedHashSet;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Set;
 
 /**
  * Data Mapper pour BasicEvaluation ↔ table LIKES.
- * - PK : NUMERO
- * - Colonnes : APPRECIATION (CHAR(1): 'T'/'F'), DATE_EVAL (DATE), ADRESSE_IP, FK_REST
- * - FK : FK_REST → RESTAURANTS.NUMERO
- * - Séquence/trigger : SEQ_EVAL + TR_BIF_LIKES
- *
- * Conversions :
- * - likeRestaurant(Boolean) <-> APPRECIATION ('T' pour true, 'F' pour false)
- * - visitDate(java.util.Date) <-> DATE_EVAL(Oracle DATE via Timestamp)
- *
- * Transactions : create/update/delete -> commit() si OK, rollback() en cas d'erreur.
- *
- * Cache : Identity Map (Map<Integer, BasicEvaluation>)
+ * - Transactions : AUCUN commit/rollback ici → gérés par la couche service.
+ * - Cache : Identity Map générique (AbstractMapper).
  */
 public class BasicEvaluationMapper extends AbstractMapper<BasicEvaluation> {
 
-    // -------------------------------
-    // Identity Map
-    // -------------------------------
-    private final Map<Integer, BasicEvaluation> cache = new HashMap<>();
-
-    // -------------------------------
-    // Dépendances (FK)
-    // -------------------------------
+    // Dépendance (FK)
     private final RestaurantMapper restaurantMapper = new RestaurantMapper();
 
     // -------------------------------
@@ -46,7 +26,6 @@ public class BasicEvaluationMapper extends AbstractMapper<BasicEvaluation> {
     // -------------------------------
     @Override
     protected String getSequenceQuery() {
-        // Même séquence que COMMENTAIRES côté schéma
         return "SELECT SEQ_EVAL.CURRVAL FROM dual";
     }
 
@@ -65,7 +44,8 @@ public class BasicEvaluationMapper extends AbstractMapper<BasicEvaluation> {
     // -------------------------------
     @Override
     public BasicEvaluation findById(int id) {
-        if (cache.containsKey(id)) return cache.get(id);
+        BasicEvaluation cached = getFromCache(id);
+        if (cached != null) return cached;
 
         String sql = "SELECT NUMERO, APPRECIATION, DATE_EVAL, ADRESSE_IP, FK_REST FROM LIKES WHERE NUMERO = ?";
         Connection cn = ConnectionUtils.getConnection();
@@ -124,7 +104,7 @@ public class BasicEvaluationMapper extends AbstractMapper<BasicEvaluation> {
 
     /** Recherche par adresse IP. */
     public Set<BasicEvaluation> findByIp(String ip) {
-        String sql = "SELECT NUMERO, APPRECIATION, DATE_EVAL, ADRESSE_IP, FK_REST FROM LIKES WHERE ADRESSE_IP = ? ORDER BY DATE_EVAL DESC, NUMERO DESC";
+        String sql = "SELECT NUMERO, APPRECIATION, DATE_EVAL, ADRESSE_IP FROM LIKES WHERE ADRESSE_IP = ? ORDER BY DATE_EVAL DESC, NUMERO DESC";
         Set<BasicEvaluation> out = new LinkedHashSet<>();
         Connection cn = ConnectionUtils.getConnection();
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
@@ -144,7 +124,6 @@ public class BasicEvaluationMapper extends AbstractMapper<BasicEvaluation> {
 
     @Override
     public BasicEvaluation create(BasicEvaluation object) {
-        // FK_REST requis
         if (object.getRestaurant() == null || object.getRestaurant().getId() == null) {
             logger.warn("create(BasicEvaluation) : restaurant (FK_REST) manquant.");
             return null;
@@ -170,14 +149,10 @@ public class BasicEvaluationMapper extends AbstractMapper<BasicEvaluation> {
                 if (rs.next()) object.setId(rs.getInt(1));
             }
 
-            cn.commit();
             addToCache(object);
             return object;
         } catch (SQLException ex) {
             logger.error("create(BasicEvaluation) - SQLException: {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("create(BasicEvaluation) - rollback error: {}", rollEx.getMessage(), rollEx);
-            }
         }
         return null;
     }
@@ -207,18 +182,12 @@ public class BasicEvaluationMapper extends AbstractMapper<BasicEvaluation> {
             ps.setInt(5, object.getId());
 
             int updated = ps.executeUpdate();
-            cn.commit();
-
             if (updated > 0) {
-                removeFromCache(object.getId());
-                addToCache(object);
+                addToCache(object); // refresh dans l’Identity Map
                 return true;
             }
         } catch (SQLException ex) {
             logger.error("update(BasicEvaluation) - SQLException: {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("update(BasicEvaluation) - rollback error: {}", rollEx.getMessage(), rollEx);
-            }
         }
         return false;
     }
@@ -239,17 +208,12 @@ public class BasicEvaluationMapper extends AbstractMapper<BasicEvaluation> {
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
             ps.setInt(1, id);
             int deleted = ps.executeUpdate();
-            cn.commit();
-
             if (deleted > 0) {
                 removeFromCache(id);
                 return true;
             }
         } catch (SQLException ex) {
             logger.error("deleteById({}) - SQLException: {}", id, ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("deleteById({}) - rollback error: {}", id, rollEx.getMessage(), rollEx);
-            }
         }
         return false;
     }
@@ -270,11 +234,7 @@ public class BasicEvaluationMapper extends AbstractMapper<BasicEvaluation> {
         Restaurant rest = null;
         if (eagerFK && fkRest > 0) {
             rest = restaurantMapper.findById(fkRest);
-        } else if (fkRest > 0) {
-            // Variante light si besoin :
-            // rest = new Restaurant(fkRest, null, null, null, (Localisation) null, (RestaurantType) null);
         }
-
         return new BasicEvaluation(id, visitDate, rest, like, ip);
     }
 
@@ -286,30 +246,5 @@ public class BasicEvaluationMapper extends AbstractMapper<BasicEvaluation> {
     private static Boolean fromAppreciationChar(String s) {
         if (s == null) return null;
         return "T".equalsIgnoreCase(s);
-    }
-
-    // -------------------------------
-    // Implémentation du cache
-    // -------------------------------
-    @Override
-    protected boolean isCacheEmpty() {
-        return cache.isEmpty();
-    }
-
-    @Override
-    protected void resetCache() {
-        cache.clear();
-    }
-
-    @Override
-    protected void addToCache(BasicEvaluation objet) {
-        if (objet != null && objet.getId() != null && !cache.containsKey(objet.getId())) {
-            cache.put(objet.getId(), objet);
-        }
-    }
-
-    @Override
-    protected void removeFromCache(Integer id) {
-        if (id != null) cache.remove(id);
     }
 }

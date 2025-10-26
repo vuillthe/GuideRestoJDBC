@@ -3,27 +3,16 @@ package ch.hearc.ig.guideresto.persistence;
 import ch.hearc.ig.guideresto.business.EvaluationCriteria;
 
 import java.sql.*;
-import java.util.*;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 /**
  * Data Mapper pour EvaluationCriteria ↔ table CRITERES_EVALUATION.
- * - PK : NUMERO
- * - Colonnes : NOM (UNIQUE), DESCRIPTION (VARCHAR2(512))
- * - Séquence/trigger : SEQ_CRITERES_EVALUATION + TR_BIF_CRITERES_EVALUATION
- *
- * Transactions : create/update/delete -> commit() si OK, rollback() en cas d'erreur.
- * Cache : Identity Map (Map<Integer, EvaluationCriteria>)
+ * - Transactions : AUCUN commit/rollback ici → gérés par la couche service.
+ * - Cache : Identity Map générique (AbstractMapper).
  */
 public class EvaluationCriteriaMapper extends AbstractMapper<EvaluationCriteria> {
 
-    // -------------------------------
-    // Identity Map
-    // -------------------------------
-    private final Map<Integer, EvaluationCriteria> cache = new HashMap<>();
-
-    // -------------------------------
-    // Requêtes "génériques" (Abstract)
-    // -------------------------------
     @Override
     protected String getSequenceQuery() {
         return "SELECT SEQ_CRITERES_EVALUATION.CURRVAL FROM dual";
@@ -39,12 +28,11 @@ public class EvaluationCriteriaMapper extends AbstractMapper<EvaluationCriteria>
         return "SELECT COUNT(*) FROM CRITERES_EVALUATION";
     }
 
-    // -------------------------------
-    // CRUD & Finders
-    // -------------------------------
+    // --------------- Finders ---------------
     @Override
     public EvaluationCriteria findById(int id) {
-        if (cache.containsKey(id)) return cache.get(id);
+        EvaluationCriteria cached = getFromCache(id);
+        if (cached != null) return cached;
 
         String sql = "SELECT NUMERO, NOM, DESCRIPTION FROM CRITERES_EVALUATION WHERE NUMERO = ?";
         Connection cn = ConnectionUtils.getConnection();
@@ -81,7 +69,7 @@ public class EvaluationCriteriaMapper extends AbstractMapper<EvaluationCriteria>
         return out;
     }
 
-    /** Finder utile grâce à la contrainte d'unicité sur NOM. */
+    /** Finder exact sur NOM (unique). */
     public EvaluationCriteria findByName(String exactName) {
         String sql = "SELECT NUMERO, NOM, DESCRIPTION FROM CRITERES_EVALUATION WHERE NOM = ?";
         Connection cn = ConnectionUtils.getConnection();
@@ -100,9 +88,10 @@ public class EvaluationCriteriaMapper extends AbstractMapper<EvaluationCriteria>
         return null;
     }
 
-    /** Recherche partielle sur NOM (LIKE, insensible à la casse). */
+    /** Recherche partielle (LIKE, insensible à la casse). */
     public Set<EvaluationCriteria> searchByName(String nameLike) {
-        String sql = "SELECT NUMERO, NOM, DESCRIPTION FROM CRITERES_EVALUATION WHERE UPPER(NOM) LIKE UPPER(?) ORDER BY NOM";
+        String sql = "SELECT NUMERO, NOM, DESCRIPTION FROM CRITERES_EVALUATION " +
+                "WHERE UPPER(NOM) LIKE UPPER(?) ORDER BY NOM";
         Set<EvaluationCriteria> out = new LinkedHashSet<>();
         Connection cn = ConnectionUtils.getConnection();
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
@@ -120,6 +109,7 @@ public class EvaluationCriteriaMapper extends AbstractMapper<EvaluationCriteria>
         return out;
     }
 
+    // --------------- CRUD (sans commit/rollback) ---------------
     @Override
     public EvaluationCriteria create(EvaluationCriteria object) {
         String sql = "INSERT INTO CRITERES_EVALUATION (NOM, DESCRIPTION) VALUES (?, ?)";
@@ -135,14 +125,10 @@ public class EvaluationCriteriaMapper extends AbstractMapper<EvaluationCriteria>
                 if (rs.next()) object.setId(rs.getInt(1));
             }
 
-            cn.commit();
             addToCache(object);
             return object;
         } catch (SQLException ex) {
             logger.error("create(EvaluationCriteria) - SQLException: {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("create(EvaluationCriteria) - rollback error: {}", rollEx.getMessage(), rollEx);
-            }
         }
         return null;
     }
@@ -160,18 +146,13 @@ public class EvaluationCriteriaMapper extends AbstractMapper<EvaluationCriteria>
             ps.setString(2, object.getDescription());
             ps.setInt(3, object.getId());
             int updated = ps.executeUpdate();
-            cn.commit();
 
             if (updated > 0) {
-                removeFromCache(object.getId());
-                addToCache(object);
+                addToCache(object); // refresh dans l’Identity Map
                 return true;
             }
         } catch (SQLException ex) {
             logger.error("update(EvaluationCriteria) - SQLException: {}", ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("update(EvaluationCriteria) - rollback error: {}", rollEx.getMessage(), rollEx);
-            }
         }
         return false;
     }
@@ -192,55 +173,22 @@ public class EvaluationCriteriaMapper extends AbstractMapper<EvaluationCriteria>
         try (PreparedStatement ps = cn.prepareStatement(sql)) {
             ps.setInt(1, id);
             int deleted = ps.executeUpdate();
-            cn.commit();
-
             if (deleted > 0) {
-                removeFromCache(id);
+                removeFromCache(id); // purge Identity Map
                 return true;
             }
         } catch (SQLException ex) {
             logger.error("deleteById({}) - SQLException: {}", id, ex.getMessage(), ex);
-            try { cn.rollback(); } catch (SQLException rollEx) {
-                logger.error("deleteById({}) - rollback error: {}", id, rollEx.getMessage(), rollEx);
-            }
         }
         return false;
     }
 
-    // -------------------------------
-    // Helpers
-    // -------------------------------
+    // --------------- Helper ---------------
     private EvaluationCriteria mapRow(ResultSet rs) throws SQLException {
         return new EvaluationCriteria(
                 rs.getInt("NUMERO"),
                 rs.getString("NOM"),
                 rs.getString("DESCRIPTION")
         );
-        // Pas de chargement des dépendances ici (objet autonome)
-    }
-
-    // -------------------------------
-    // Implémentation du cache
-    // -------------------------------
-    @Override
-    protected boolean isCacheEmpty() {
-        return cache.isEmpty();
-    }
-
-    @Override
-    protected void resetCache() {
-        cache.clear();
-    }
-
-    @Override
-    protected void addToCache(EvaluationCriteria objet) {
-        if (objet != null && objet.getId() != null && !cache.containsKey(objet.getId())) {
-            cache.put(objet.getId(), objet);
-        }
-    }
-
-    @Override
-    protected void removeFromCache(Integer id) {
-        if (id != null) cache.remove(id);
     }
 }
