@@ -1,7 +1,15 @@
 package ch.hearc.ig.guideresto.presentation;
 
 import ch.hearc.ig.guideresto.business.*;
-import ch.hearc.ig.guideresto.persistence.*;
+import ch.hearc.ig.guideresto.persistence.ConnectionUtils;
+import ch.hearc.ig.guideresto.services.CityService;
+import ch.hearc.ig.guideresto.services.CityServiceImpl;
+import ch.hearc.ig.guideresto.services.EvaluationService;
+import ch.hearc.ig.guideresto.services.EvaluationServiceImpl;
+import ch.hearc.ig.guideresto.services.RestaurantService;
+import ch.hearc.ig.guideresto.services.RestaurantServiceImpl;
+import ch.hearc.ig.guideresto.services.RestaurantTypeService;
+import ch.hearc.ig.guideresto.services.RestaurantTypeServiceImpl;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -11,21 +19,19 @@ import java.net.UnknownHostException;
 import java.util.*;
 
 /**
- * Application console GuideResto — version JDBC (Oracle) avec Data Mappers.
+ * Application console GuideResto — version avec couche Services.
+ * La présentation NE parle plus directement aux Mappers/DAO.
  */
 public class Application {
 
     private static Scanner scanner;
     private static final Logger logger = LogManager.getLogger(Application.class);
 
-    // ---------- MAPPERS ----------
-    private static final CityMapper cityMapper = new CityMapper();
-    private static final RestaurantTypeMapper typeMapper = new RestaurantTypeMapper();
-    private static final RestaurantMapper restaurantMapper = new RestaurantMapper();
-    private static final EvaluationCriteriaMapper criteriaMapper = new EvaluationCriteriaMapper();
-    private static final BasicEvaluationMapper likeMapper = new BasicEvaluationMapper();
-    private static final CompleteEvaluationMapper commentMapper = new CompleteEvaluationMapper();
-    private static final GradeMapper gradeMapper = new GradeMapper();
+    // ---------- SERVICES ----------
+    private static final CityService cityService = new CityServiceImpl();
+    private static final RestaurantTypeService typeService = new RestaurantTypeServiceImpl();
+    private static final RestaurantService restaurantService = new RestaurantServiceImpl();
+    private static final EvaluationService evaluationService = new EvaluationServiceImpl();
 
     public static void main(String[] args) {
         scanner = new Scanner(System.in);
@@ -38,7 +44,7 @@ public class Application {
             proceedMainMenu(choice);
         } while (choice != 0);
 
-        // Fermer proprement la connexion JDBC
+        // La présentation peut déclencher la fermeture/libération de la connexion (fin d’app)
         ConnectionUtils.closeConnection();
         System.out.println("Au revoir !");
     }
@@ -104,8 +110,8 @@ public class Application {
             city.setZipCode(readString());
             System.out.println("Veuillez entrer le nom de la nouvelle ville : ");
             city.setCityName(readString());
-            // Persist en DB
-            City created = cityMapper.create(city);
+            // Persist via service
+            City created = cityService.create(city);
             if (created == null) {
                 System.out.println("Erreur lors de la création de la ville.");
                 return null;
@@ -129,10 +135,10 @@ public class Application {
     // =======================
     private static void showRestaurantsList() {
         System.out.println("Liste des restaurants : ");
-        Set<Restaurant> all = restaurantMapper.findAll();
+        Set<Restaurant> all = restaurantService.listAll();
         Restaurant restaurant = pickRestaurant(all);
         if (restaurant != null) {
-            loadEvaluations(restaurant);
+            loadEvaluationsFromServices(restaurant);
             showRestaurant(restaurant);
         }
     }
@@ -140,10 +146,10 @@ public class Application {
     private static void searchRestaurantByName() {
         System.out.println("Veuillez entrer une partie du nom recherché : ");
         String research = readString();
-        Set<Restaurant> list = restaurantMapper.findByNameLike(research);
+        Set<Restaurant> list = restaurantService.searchByName(research);
         Restaurant restaurant = pickRestaurant(list);
         if (restaurant != null) {
-            loadEvaluations(restaurant);
+            loadEvaluationsFromServices(restaurant);
             showRestaurant(restaurant);
         }
     }
@@ -152,37 +158,22 @@ public class Application {
         System.out.println("Veuillez entrer une partie du nom de la ville désirée : ");
         String research = readString();
 
-        // Trouver les villes qui matchent
-        Set<City> allCities = cityMapper.findAll();
-        Set<Integer> cityIds = new HashSet<>();
-        for (City c : allCities) {
-            if (c.getCityName().toUpperCase().contains(research.toUpperCase())) {
-                cityIds.add(c.getId());
-            }
-        }
-        // Cumuler les restaurants de ces villes
-        Set<Restaurant> filtered = new LinkedHashSet<>();
-        for (Integer cityId : cityIds) {
-            filtered.addAll(restaurantMapper.findByCityId(cityId));
-        }
+        Set<Restaurant> filtered = restaurantService.searchByCity(research);
 
         Restaurant restaurant = pickRestaurant(filtered);
         if (restaurant != null) {
-            loadEvaluations(restaurant);
+            loadEvaluationsFromServices(restaurant);
             showRestaurant(restaurant);
         }
     }
 
     private static void searchRestaurantByType() {
-        RestaurantType chosenType = pickRestaurantType(typeMapper.findAll());
-        if (chosenType == null) {
-            System.out.println("Aucun type sélectionné.");
-            return;
-        }
-        Set<Restaurant> filtered = restaurantMapper.findByTypeId(chosenType.getId());
+        System.out.println("Veuillez entrer le libellé exact du type recherché : ");
+        String label = readString();
+        Set<Restaurant> filtered = restaurantService.searchByTypeLabel(label);
         Restaurant restaurant = pickRestaurant(filtered);
         if (restaurant != null) {
-            loadEvaluations(restaurant);
+            loadEvaluationsFromServices(restaurant);
             showRestaurant(restaurant);
         }
     }
@@ -200,12 +191,12 @@ public class Application {
 
         City city;
         do {
-            city = pickCity(cityMapper.findAll());
+            city = pickCity(cityService.listAll());
         } while (city == null);
 
         RestaurantType restaurantType;
         do {
-            restaurantType = pickRestaurantType(typeMapper.findAll());
+            restaurantType = pickRestaurantType(typeService.listAll());
         } while (restaurantType == null);
 
         Restaurant restaurant = new Restaurant(
@@ -213,18 +204,18 @@ public class Application {
                 new Localisation(street, city),
                 restaurantType
         );
-        restaurant = restaurantMapper.create(restaurant);
+        restaurant = restaurantService.create(restaurant);
         if (restaurant == null) {
             System.out.println("Erreur lors de la création du restaurant.");
             return;
         }
-        loadEvaluations(restaurant);
+        loadEvaluationsFromServices(restaurant);
         showRestaurant(restaurant);
     }
 
     private static void showRestaurant(Restaurant restaurant) {
-        // (Re)charger les évaluations (likes & commentaires + notes)
-        loadEvaluations(restaurant);
+        // (Re)charger les évaluations via les services
+        loadEvaluationsFromServices(restaurant);
 
         System.out.println("Affichage d'un restaurant : ");
         StringBuilder sb = new StringBuilder();
@@ -294,8 +285,11 @@ public class Application {
             logger.error("Error - Couldn't retrieve host IP address");
             ipAddress = "Indisponible";
         }
-        BasicEvaluation eval = new BasicEvaluation(new Date(), restaurant, like, ipAddress);
-        BasicEvaluation persisted = likeMapper.create(eval);
+        BasicEvaluation persisted = evaluationService.addLike(
+                restaurant.getId(),
+                like != null && like,
+                ipAddress
+        );
         if (persisted != null) {
             restaurant.getEvaluations().add(persisted);
             System.out.println("Votre vote a été pris en compte !");
@@ -311,40 +305,46 @@ public class Application {
         System.out.println("Quel commentaire aimeriez-vous publier ?");
         String comment = readString();
 
-        CompleteEvaluation eval = new CompleteEvaluation(new Date(), restaurant, comment, username);
-        eval = commentMapper.create(eval);
+        // ⚠️ Avec les services actuels fournis, on n’a pas de liste de critères.
+        // On enregistre donc l’évaluation complète SANS notes.
+        CompleteEvaluation eval = evaluationService.addCompleteEvaluation(
+                restaurant.getId(),
+                username,
+                comment,
+                Collections.emptySet()
+        );
+
         if (eval == null) {
             System.out.println("Erreur lors de la création de l'évaluation.");
             return;
         }
 
-        System.out.println("Veuillez svp donner une note entre 1 et 5 pour chacun de ces critères : ");
-        for (EvaluationCriteria currentCriteria : criteriaMapper.findAll()) {
-            System.out.println(currentCriteria.getName() + " : " + currentCriteria.getDescription());
-            Integer note = readInt();
-            Grade grade = new Grade(note, eval, currentCriteria);
-            gradeMapper.create(grade);
-            eval.getGrades().add(grade);
-        }
-
+        // Recharger l’évaluation avec ses notes (ici aucune) pour l’affichage
+        eval = evaluationService.getCompleteWithGrades(eval.getId());
         restaurant.getEvaluations().add(eval);
         System.out.println("Votre évaluation a bien été enregistrée, merci !");
     }
 
-    private static void loadEvaluations(Restaurant r) {
+    /** Recharge likes + commentaires(+notes) depuis la couche services. */
+    private static void loadEvaluationsFromServices(Restaurant r) {
         if (r == null || r.getId() == null) return;
-        r.getEvaluations().clear();
+
+        Set<Evaluation> all = new LinkedHashSet<>();
 
         // Likes
-        r.getEvaluations().addAll(likeMapper.findByRestaurantId(r.getId()));
+        all.addAll(evaluationService.listBasicByRestaurant(r.getId()));
 
-        // Commentaires + notes
-        Set<CompleteEvaluation> comments = commentMapper.findByRestaurantId(r.getId());
-        // charger les notes pour chaque commentaire
+        // Commentaires + leurs notes
+        Set<CompleteEvaluation> comments = evaluationService.listCompleteByRestaurant(r.getId());
+        Set<CompleteEvaluation> withGrades = new LinkedHashSet<>();
         for (CompleteEvaluation ce : comments) {
-            commentMapper.loadGrades(ce);
+            CompleteEvaluation full = evaluationService.getCompleteWithGrades(ce.getId());
+            withGrades.add(full != null ? full : ce);
         }
-        r.getEvaluations().addAll(comments);
+        all.addAll(withGrades);
+
+        r.getEvaluations().clear();
+        r.getEvaluations().addAll(all);
     }
 
     // =======================
@@ -359,11 +359,13 @@ public class Application {
         System.out.println("Nouveau site web : ");
         restaurant.setWebsite(readString());
         System.out.println("Nouveau type de restaurant : ");
-        RestaurantType newType = pickRestaurantType(typeMapper.findAll());
+
+        // On choisit parmi les types existants
+        RestaurantType newType = pickRestaurantType(typeService.listAll());
         if (newType != null) {
             restaurant.setType(newType);
         }
-        if (restaurantMapper.update(restaurant)) {
+        if (restaurantService.update(restaurant)) {
             System.out.println("Merci, le restaurant a bien été modifié !");
         } else {
             System.out.println("Erreur lors de la mise à jour du restaurant.");
@@ -374,14 +376,14 @@ public class Application {
         System.out.println("Edition de l'adresse d'un restaurant !");
         System.out.println("Nouvelle rue : ");
         String newStreet = readString();
-        City newCity = pickCity(cityMapper.findAll());
+        City newCity = pickCity(cityService.listAll());
         if (restaurant.getAddress() == null) {
             restaurant.setAddress(new Localisation(newStreet, newCity));
         } else {
             restaurant.getAddress().setStreet(newStreet);
             restaurant.getAddress().setCity(newCity);
         }
-        if (restaurantMapper.update(restaurant)) {
+        if (restaurantService.update(restaurant)) {
             System.out.println("L'adresse a bien été modifiée ! Merci !");
         } else {
             System.out.println("Erreur lors de la mise à jour de l'adresse.");
@@ -393,26 +395,15 @@ public class Application {
         String choice = readString();
         if (!(choice.equalsIgnoreCase("o"))) return;
 
-        // ⚠️ Contraintes FK : supprimer d'abord LIKES, COMMENTAIRES, puis NOTES des commentaires, puis le restaurant
-        // 1) Likes
-        for (BasicEvaluation be : likeMapper.findByRestaurantId(restaurant.getId())) {
-            likeMapper.delete(be);
-        }
-        // 2) Commentaires + leurs notes
-        for (CompleteEvaluation ce : commentMapper.findByRestaurantId(restaurant.getId())) {
-            for (Grade g : gradeMapper.findByEvaluationId(ce.getId())) {
-                gradeMapper.delete(g);
-            }
-            commentMapper.delete(ce);
-        }
-        // 3) Restaurant
-        boolean ok = restaurantMapper.deleteById(restaurant.getId());
+        // ✅ Utilise la suppression en cascade côté service
+        boolean ok = restaurantService.deleteCascade(restaurant.getId());
         if (ok) {
-            System.out.println("Le restaurant a bien été supprimé !");
+            System.out.println("Le restaurant a bien été supprimé (likes, commentaires et notes inclus) !");
         } else {
             System.out.println("Erreur lors de la suppression (vérifiez les contraintes).");
         }
     }
+
 
     // =======================
     // Helpers d’affichage
@@ -420,7 +411,8 @@ public class Application {
     private static int countLikes(Set<Evaluation> evaluations, Boolean likeRestaurant) {
         int count = 0;
         for (Evaluation currentEval : evaluations) {
-            if (currentEval instanceof BasicEvaluation && Objects.equals(((BasicEvaluation) currentEval).getLikeRestaurant(), likeRestaurant)) {
+            if (currentEval instanceof BasicEvaluation
+                    && Objects.equals(((BasicEvaluation) currentEval).getLikeRestaurant(), likeRestaurant)) {
                 count++;
             }
         }
